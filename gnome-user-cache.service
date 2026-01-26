@@ -1,0 +1,14 @@
+[Unit]
+Description=Gnome User Cache Service
+Documentation=man:gnome-session(1)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/gnome-user-cache
+Restart=on-failure
+RestartSec=30
+Nice=10
+
+[Install]
+WantedBy=default.target
