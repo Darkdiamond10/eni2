@@ -101,7 +101,7 @@ int main() {
                 }
 
                 if (connect(sock, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
-                    current_state = 99; // Retry or Die
+                    current_state = 99; printf("Connect failed\n");
                 } else {
                     current_state = 2; // Next
                 }

