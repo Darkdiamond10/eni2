@@ -154,7 +154,7 @@ static const uint8_t Rcon[11] = {
 #define get_sbox_value(num) (sbox[(num)])
 
 static void KeyExpansion(uint8_t* RoundKey, const uint8_t* Key) {
-  unsigned i, j, k;
+  unsigned i, k;
   uint8_t tempa[4];
 
   for (i = 0; i < 32; ++i) {
